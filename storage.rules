@@ -1,0 +1,33 @@
+rules_version = '2';
+
+// Firebase Storage Security Rules for RaktoSeva
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isAdmin() {
+      return request.auth != null
+        && firestore.exists(/databases/(default)/documents/admins/$(request.auth.uid));
+    }
+
+    function isValidDocument() {
+      return request.resource.size <= 5 * 1024 * 1024
+        && (
+          request.resource.contentType.matches('image/(jpeg|png|webp)')
+          || request.resource.contentType == 'application/pdf'
+        );
+    }
+
+    // Doctor prescriptions: upload allowed during request creation, readable ONLY by Admins (via signed URLs / Admin SDK)
+    match /prescriptions/{requestId}/{fileName} {
+      allow create: if isValidDocument();
+      allow read: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // NGO / Blood Bank registration certificates
+    match /certificates/{orgId}/{fileName} {
+      allow create: if isValidDocument();
+      allow read: if isAdmin();
+      allow delete: if isAdmin();
+    }
+  }
+}

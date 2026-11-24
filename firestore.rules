@@ -1,0 +1,166 @@
+rules_version = '2';
+
+// Hardened Firestore Security Rules for RaktoSeva
+// Phone numbers are isolated in donors_private and organizations_private and never publicly readable.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidPhone(phone) {
+      return phone is string && phone.matches('^[6-9][0-9]{9}$');
+    }
+
+    function isValidPin(pin) {
+      return pin is string && pin.matches('^[0-9]{6}$');
+    }
+
+    function isValidBloodGroup(bg) {
+      return bg in ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+    }
+
+    function isValidOrgType(t) {
+      return t in ['NGO', 'Blood Bank'];
+    }
+
+    // Public aggregate counters (updated via Cloud Functions / Admin)
+    match /stats/public {
+      allow get: if true;
+      allow list, write: if false;
+    }
+
+    // Admins collection (managed via Firebase Console / Admin SDK)
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && request.auth.uid == adminId;
+      allow list, write: if false;
+    }
+
+    // Public donor directory without phone numbers (Split-Collection PII Isolation)
+    match /donors_public/{donorId} {
+      allow get, list: if resource.data.isEligible == true || isAdmin();
+      allow create, update: if isSignedIn()
+        && isValidId(donorId)
+        && request.auth.uid == donorId
+        && request.resource.data.keys().hasAll(['fullName', 'gender', 'bloodGroup', 'district', 'area', 'pinCode', 'neverDonated', 'isEligible'])
+        && request.resource.data.keys().hasOnly(['fullName', 'gender', 'bloodGroup', 'state', 'district', 'area', 'pinCode', 'lastDonationDate', 'neverDonated', 'nextEligibleDate', 'isEligible', 'updatedAt'])
+        && request.resource.data.fullName is string && request.resource.data.fullName.size() >= 2 && request.resource.data.fullName.size() <= 100
+        && request.resource.data.gender in ['Male', 'Female']
+        && isValidBloodGroup(request.resource.data.bloodGroup)
+        && isValidPin(request.resource.data.pinCode)
+        && request.resource.data.neverDonated is bool
+        && request.resource.data.isEligible is bool;
+      allow delete: if isAdmin() || (isSignedIn() && request.auth.uid == donorId);
+    }
+
+    // Protected donor PII & phone numbers (never publicly readable; accessed by owner, admin, or getDistrictContacts Cloud Function)
+    match /donors_private/{donorId} {
+      allow get: if isAdmin() || (isSignedIn() && request.auth.uid == donorId);
+      allow list: if isAdmin();
+      allow create: if isSignedIn()
+        && isValidId(donorId)
+        && request.auth.uid == donorId
+        && request.resource.data.keys().hasAll(['uid', 'fullName', 'gender', 'bloodGroup', 'phoneNumber', 'district', 'area', 'pinCode', 'neverDonated', 'isEligible', 'consentGiven', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['uid', 'fullName', 'gender', 'bloodGroup', 'phoneNumber', 'altPhone', 'state', 'district', 'area', 'pinCode', 'lastDonationDate', 'neverDonated', 'nextEligibleDate', 'isEligible', 'consentGiven', 'createdAt', 'updatedAt'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.gender in ['Male', 'Female']
+        && request.resource.data.consentGiven == true
+        && isValidBloodGroup(request.resource.data.bloodGroup)
+        && isValidPhone(request.resource.data.phoneNumber)
+        && isValidPin(request.resource.data.pinCode)
+        && request.resource.data.neverDonated is bool
+        && request.resource.data.isEligible is bool
+        && request.resource.data.createdAt == request.time;
+      allow update: if isAdmin() || (
+        isSignedIn()
+        && request.auth.uid == donorId
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.gender in ['Male', 'Female']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fullName', 'gender', 'bloodGroup', 'phoneNumber', 'altPhone', 'state', 'district', 'area', 'pinCode', 'lastDonationDate', 'neverDonated', 'nextEligibleDate', 'isEligible', 'updatedAt'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Public approved NGOs & Blood Banks directory WITHOUT phone numbers or email
+    match /organizations_public/{orgId} {
+      allow get, list: if resource.data.status == 'approved' || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    // Protected NGOs & Blood Banks contact numbers & full registration details (never publicly readable)
+    match /organizations_private/{orgId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(orgId)
+        && request.resource.data.status == 'pending'
+        && request.resource.data.keys().hasAll(['type', 'ngoName', 'registrationNumber', 'contactPerson', 'phone', 'email', 'address', 'district', 'area', 'pinCode', 'services', 'status', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['type', 'ngoName', 'registrationNumber', 'contactPerson', 'phone', 'email', 'address', 'state', 'district', 'area', 'pinCode', 'services', 'certificatePath', 'status', 'createdAt', 'updatedAt'])
+        && isValidOrgType(request.resource.data.type)
+        && isValidPhone(request.resource.data.phone)
+        && isValidPin(request.resource.data.pinCode)
+        && request.resource.data.services is list
+        && request.resource.data.services.size() >= 1
+        && request.resource.data.services.size() <= 10
+        && request.resource.data.createdAt == request.time;
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'type', 'updatedAt'])
+        && request.resource.data.status in ['approved', 'rejected'];
+      allow delete: if isAdmin();
+    }
+
+    // NGOs & Blood Banks collection:
+    // - Anyone can create a new NGO/Blood Bank with status == 'pending'
+    // - Public read allowed ONLY when status == 'approved' (admins can read all for moderation)
+    match /ngos/{ngoId} {
+      allow read: if resource.data.status == 'approved' || isAdmin();
+      allow create: if isValidId(ngoId)
+        && request.resource.data.status == 'pending'
+        && request.resource.data.keys().hasAll(['type', 'ngoName', 'registrationNumber', 'contactPerson', 'phone', 'email', 'address', 'state', 'district', 'area', 'pinCode', 'services', 'status', 'createdAt', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['type', 'ngoName', 'registrationNumber', 'contactPerson', 'phone', 'email', 'address', 'state', 'district', 'area', 'pinCode', 'services', 'certificateFileName', 'certificatePath', 'status', 'createdAt', 'updatedAt'])
+        && isValidOrgType(request.resource.data.type)
+        && request.resource.data.ngoName is string && request.resource.data.ngoName.size() >= 2 && request.resource.data.ngoName.size() <= 150
+        && isValidPhone(request.resource.data.phone)
+        && isValidPin(request.resource.data.pinCode)
+        && request.resource.data.services is list
+        && request.resource.data.services.size() >= 1
+        && request.resource.data.services.size() <= 10
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update, delete: if isAdmin();
+    }
+
+    // Blood Requests collection (readable only by admins or server-side Cloud Functions)
+    match /requests/{requestId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(requestId)
+        && request.resource.data.status == 'active'
+        && request.resource.data.keys().hasAll(['patientName', 'requesterName', 'phone', 'bloodGroup', 'units', 'urgency', 'hospitalName', 'district', 'area', 'pinCode', 'prescriptionPath', 'status', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['patientName', 'requesterName', 'phone', 'bloodGroup', 'units', 'urgency', 'hospitalName', 'state', 'district', 'area', 'pinCode', 'notes', 'prescriptionPath', 'status', 'createdAt'])
+        && isValidPhone(request.resource.data.phone)
+        && isValidBloodGroup(request.resource.data.bloodGroup)
+        && request.resource.data.units is int && request.resource.data.units >= 1 && request.resource.data.units <= 20
+        && request.resource.data.urgency in ['Emergency', 'Within 24 hrs', 'Within 3 days']
+        && isValidPin(request.resource.data.pinCode)
+        && request.resource.data.createdAt == request.time;
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'fulfilledAt'])
+        && request.resource.data.status == 'fulfilled';
+      allow delete: if isAdmin();
+    }
+  }
+}

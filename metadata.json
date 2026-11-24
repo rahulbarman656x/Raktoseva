@@ -1,0 +1,6 @@
+{
+  "name": "RaktoSeva",
+  "description": "Community blood donation connector platform for India connecting patients, verified blood donors, and NGOs across West Bengal and neighboring states.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
